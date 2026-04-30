@@ -1,4 +1,4 @@
-.PHONY: all pull pull-blog install nopyc clean ingest pretrain-tone generate-data train export register unregister smoke-test probe setup-base-agent pipeline pipeline-bg
+.PHONY: all pull pull-blog install prefetch nopyc clean ingest pretrain-tone generate-data train export register unregister smoke-test probe setup-base-agent pipeline pipeline-bg
 
 LOG_DIR := logs
 
@@ -13,6 +13,14 @@ INCLUDE_TESTS   ?= false
 SAMPLE_EVERY    ?= 1
 LIMIT           ?= 0
 PIPELINE_SESSION ?= cortex-retrain
+
+# Set NO_INSTALL=1 to drop install/pull-blog deps from per-stage targets. The
+# pipeline sets this after prefetch has populated everything, so each stage
+# can run offline. Standalone invocations (`make train`, etc.) still install.
+INSTALL_DEP   := $(if $(NO_INSTALL),,install)
+PULL_BLOG_DEP := $(if $(NO_INSTALL),,pull-blog)
+
+OFFLINE_ENV := HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PIP_NO_INDEX=1 GIT_TERMINAL_PROMPT=0
 
 all: install
 
@@ -38,6 +46,17 @@ install: pull venv
 		fi; \
 	)
 
+# Front-loads every internet-dependent artifact: git refs, pip wheels, HF model
+# weights. Run once before pipeline-bg so the multi-day body runs offline. The
+# from_pretrained call mirrors train.py/pretrain_tone.py exactly so Unsloth
+# pulls the full set (google/gemma-4-31B-it, unsloth/gemma-4-31b-it, and the
+# unsloth/gemma-4-31b-it-unsloth-bnb-4bit quantized weights, ~136GB total).
+prefetch: install pull-blog
+	@( \
+		source $(PROJECT_VENV)/bin/activate; \
+		python -c "from unsloth import FastLanguageModel; from config import HF_MODEL_ID, MAX_SEQ_LENGTH; FastLanguageModel.from_pretrained(model_name=HF_MODEL_ID, max_seq_length=MAX_SEQ_LENGTH, dtype=None, load_in_4bit=True)"; \
+	)
+
 nopyc:
 	find . -name '*.pyc' | xargs rm -f || true
 	find . -name __pycache__ | xargs rm -rf || true
@@ -48,13 +67,13 @@ clean: nopyc
 ingest:
 	@$(MAKE) --no-print-directory -C ../rag ingest
 
-pretrain-tone: install pull-blog
+pretrain-tone: $(INSTALL_DEP) $(PULL_BLOG_DEP)
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
 		python $(CORTEX_DIR)/finetune/pretrain_tone.py; \
 	)
 
-generate-data: install
+generate-data: $(INSTALL_DEP)
 	@mkdir -p $(LOG_DIR)
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
@@ -64,19 +83,19 @@ generate-data: install
 			$(if $(filter true,$(INCLUDE_TESTS)),--include-tests,); \
 	)
 
-train: install
+train: $(INSTALL_DEP)
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
 		python $(CORTEX_DIR)/finetune/train.py; \
 	)
 
-train-merge: install
+train-merge: $(INSTALL_DEP)
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
 		python $(CORTEX_DIR)/finetune/train.py --merge-only; \
 	)
 
-export: install
+export: $(INSTALL_DEP)
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
 		python $(CORTEX_DIR)/finetune/export.py --quant $(QUANT) --model-name $(MODEL_NAME); \
@@ -157,12 +176,18 @@ pipeline:
 # The actual chain. Halts on first failure. Ollama models are evicted between
 # Ollama-using and HuggingFace-using stages to avoid VRAM contention with the
 # 31B Gemma 4 load. Invoked inside the tmux session by `make pipeline`.
-pipeline-bg:
-	$(MAKE) --no-print-directory ingest
+#
+# Prefetch front-loads everything internet-dependent so the body can survive a
+# net outage. Each stage runs with NO_INSTALL=1 (skips install/pull deps) and
+# OFFLINE_ENV (HF/pip refuse network) to fail fast if something tries to phone
+# home. register's probe step intentionally still does git pull — if net is out
+# at the very end, re-run `make probe` once it's back.
+pipeline-bg: prefetch
+	$(OFFLINE_ENV) $(MAKE) --no-print-directory ingest NO_INSTALL=1
 	-@ollama stop nomic-embed-text 2>/dev/null
-	$(MAKE) --no-print-directory pretrain-tone
-	$(MAKE) --no-print-directory generate-data
+	$(OFFLINE_ENV) $(MAKE) --no-print-directory pretrain-tone NO_INSTALL=1
+	$(OFFLINE_ENV) $(MAKE) --no-print-directory generate-data NO_INSTALL=1
 	-@ollama stop gemma4 2>/dev/null
-	$(MAKE) --no-print-directory train
-	$(MAKE) --no-print-directory export
-	$(MAKE) --no-print-directory register
+	$(OFFLINE_ENV) $(MAKE) --no-print-directory train NO_INSTALL=1
+	$(OFFLINE_ENV) $(MAKE) --no-print-directory export NO_INSTALL=1
+	$(OFFLINE_ENV) $(MAKE) --no-print-directory register NO_INSTALL=1
