@@ -36,6 +36,10 @@ GENERATION_PROMPT = (
     "{\"question\": \"...\", \"answer\": \"...\"}"
 )
 
+REQUEST_TIMEOUT = 60
+MAX_ATTEMPTS = 3
+CONSECUTIVE_FAILURE_LIMIT = 10
+
 
 def scroll_chunks(client, collection, sample_every, include_tests=False):
     offset = None
@@ -98,21 +102,35 @@ def _parse_json_response(content):
     return fields if fields else None
 
 
+def _post_chat(ollama_base_url, model, chunk_text):
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": GENERATION_PROMPT},
+            {"role": "user", "content": chunk_text},
+        ],
+    }
+    last_error = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = requests.post(f"{ollama_base_url}/api/chat", json=payload, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            return response
+        except requests.HTTPError as e:
+            if e.response.status_code < 500 or attempt == MAX_ATTEMPTS:
+                raise
+            last_error = e
+        except (requests.Timeout, requests.ConnectionError) as e:
+            if attempt == MAX_ATTEMPTS:
+                raise
+            last_error = e
+        logger.warning(f"Ollama request failed ({last_error.__class__.__name__}), retrying (attempt {attempt}/{MAX_ATTEMPTS})")
+
+
 def generate_pair(chunk_text, ollama_base_url, model):
     try:
-        response = requests.post(
-            f"{ollama_base_url}/api/chat",
-            json={
-                "model": model,
-                "stream": False,
-                "messages": [
-                    {"role": "system", "content": GENERATION_PROMPT},
-                    {"role": "user", "content": chunk_text},
-                ],
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
+        response = _post_chat(ollama_base_url, model, chunk_text)
         content = response.json()["message"]["content"].strip()
         pair = _parse_json_response(content)
         if not pair:
@@ -155,6 +173,7 @@ def generate_data(collection, limit, sample_every, output_path, ollama_base_url,
 
     client = QdrantClient(url=QDRANT_URL)
     total, skipped, written = 0, 0, 0
+    consecutive_failures = 0
 
     with open(output_path, mode) as out:
         if not append:
@@ -176,7 +195,16 @@ def generate_data(collection, limit, sample_every, output_path, ollama_base_url,
             result = generate_pair(chunk_text, ollama_base_url, model)
             if result is None:
                 skipped += 1
+                consecutive_failures += 1
+                if consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT:
+                    raise SystemExit(
+                        f"Aborting — {consecutive_failures} consecutive chunks failed. "
+                        f"Check Ollama health and review logs. "
+                        f"Partial output saved to {output_path} ({written} pairs written, {skipped} skipped)."
+                    )
                 continue
+
+            consecutive_failures = 0
 
             question, answer = result
             if question in seen_questions:
