@@ -1,4 +1,4 @@
-.PHONY: all pull pull-blog install prefetch nopyc clean ingest pretrain-tone generate-data train export register unregister smoke-test probe setup-base-agent pipeline pipeline-bg
+.PHONY: all pull pull-blog install prefetch nopyc clean ingest pretrain-tone generate-data train export register unregister smoke-test probe setup-base-agent ollama-sweep pipeline pipeline-bg
 
 LOG_DIR := logs
 
@@ -75,7 +75,7 @@ clean: nopyc
 ingest:
 	@$(MAKE) --no-print-directory -C ../rag ingest
 
-pretrain-tone: $(INSTALL_DEP) $(PULL_BLOG_DEP)
+pretrain-tone: $(INSTALL_DEP) $(PULL_BLOG_DEP) ollama-sweep
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
 		python $(CORTEX_DIR)/finetune/pretrain_tone.py; \
@@ -91,13 +91,13 @@ generate-data: $(INSTALL_DEP)
 			$(if $(filter true,$(INCLUDE_TESTS)),--include-tests,); \
 	)
 
-train: $(INSTALL_DEP)
+train: $(INSTALL_DEP) ollama-sweep
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
 		python $(CORTEX_DIR)/finetune/train.py; \
 	)
 
-train-merge: $(INSTALL_DEP)
+train-merge: $(INSTALL_DEP) ollama-sweep
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
 		python $(CORTEX_DIR)/finetune/train.py --merge-only; \
@@ -115,6 +115,14 @@ setup-base-agent: pull
 	$(CORTEX_DIR)/bin/setup-base-agent
 	@$(MAKE) --no-print-directory probe
 
+# Sweep every warm model off the GPU. Used as a prereq to GPU-heavy training
+# stages so external clients (Open WebUI, opencode, pi) can't strand a model
+# in VRAM and blow the trainer's memory budget. `ollama stop` returns once the
+# runner is signaled; the sleep covers the ~1–2s VRAM-release lag.
+ollama-sweep:
+	-@ollama ps 2>/dev/null | awk 'NR>1 {print $$1}' | xargs -r -n1 ollama stop 2>/dev/null
+	-@sleep 1
+
 unregister:
 	-@ollama rm $(MODEL_NAME) 2>/dev/null
 	-@ollama rm $(MODEL_NAME)-agent 2>/dev/null
@@ -125,7 +133,7 @@ unregister:
 	ollama cp $(BASE_AGENT_OVERLAY_NAME) $(MODEL_NAME)-agent
 	docker restart pipelines
 
-register:
+register: ollama-sweep
 	@# Clear Ollama's cached manifest/blob digest for this model; otherwise
 	@# re-registering an overwritten GGUF trips "digest mismatch".
 	-@ollama rm $(MODEL_NAME) 2>/dev/null
@@ -182,10 +190,10 @@ pipeline:
 	@PANE_PID=$$(tmux list-panes -t $(PIPELINE_SESSION) -F "#{pane_pid}" 2>/dev/null | head -1); \
 	  exec tail -f $${PANE_PID:+--pid=$$PANE_PID} $(LOG_DIR)/pipeline.log
 
-# The actual chain. Halts on first failure. The teacher model
-# ($(BASE_OLLAMA_MODEL)) is stopped between generate-data and train to free
-# VRAM for the HuggingFace 4-bit load. Invoked inside the tmux session by
-# `make pipeline`.
+# The actual chain. Halts on first failure. Train and register declare
+# ollama-sweep as a prereq, so the teacher model ($(BASE_OLLAMA_MODEL)) and
+# any other warm Ollama model are evicted before the HuggingFace 4-bit load.
+# Invoked inside the tmux session by `make pipeline`.
 #
 # Prefetch front-loads everything internet-dependent so the body can survive a
 # net outage. Each stage runs with NO_INSTALL=1 (skips install/pull deps) and
@@ -199,9 +207,7 @@ pipeline:
 # run `make pretrain-tone` manually before `make pipeline`.
 pipeline-bg: prefetch
 	$(OFFLINE_ENV) $(MAKE) --no-print-directory ingest NO_INSTALL=1
-	-@ollama stop nomic-embed-text 2>/dev/null
 	$(OFFLINE_ENV) $(MAKE) --no-print-directory generate-data NO_INSTALL=1
-	-@ollama stop $(BASE_OLLAMA_MODEL) 2>/dev/null
 	$(OFFLINE_ENV) $(MAKE) --no-print-directory train NO_INSTALL=1
 	$(OFFLINE_ENV) $(MAKE) --no-print-directory export NO_INSTALL=1
 	$(OFFLINE_ENV) $(MAKE) --no-print-directory register NO_INSTALL=1
