@@ -23,7 +23,7 @@ CHAT_SYSTEM_PROMPT = _PROMPT_PATH.read_text().strip()
 class Pipeline:
     class Valves(BaseModel):
         OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
-        OLLAMA_MODEL: str = "gemma4"
+        OLLAMA_MODEL: str = "gemma"
         QDRANT_URL: str = "http://qdrant:6333"
         EMBED_MODEL: str = "nomic-embed-text"
         COLLECTION_NAME: str = "cortex"

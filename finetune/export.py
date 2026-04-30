@@ -9,7 +9,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd()))
 
-from config import FINETUNE_OUTPUT_DIR, MODEL_SYSTEM_PROMPT
+from config import (
+    FINETUNE_OUTPUT_DIR,
+    MODEL_SYSTEM_PROMPT,
+    MODELFILE_CHAT_TEMPLATE,
+    MODELFILE_SAMPLING_AGENT,
+    MODELFILE_SAMPLING_CHAT,
+    MODELFILE_STOP_TOKENS,
+)
 from run_helper import banner, follow
 
 logger = logging.getLogger(__name__)
@@ -21,56 +28,38 @@ logger = logging.getLogger(__name__)
 # upstream adds an arch enum the locally-installed gguf doesn't yet expose.
 LLAMA_CPP_DIR = Path("~/.unsloth/llama.cpp").expanduser()
 
-# Explicit multi-turn Gemma chat template + sampling params. Stock gemma4 uses
-# `RENDERER gemma4` / `PARSER gemma4` directives that Ollama ties to the stock
-# blob digest and rejects for derived models, so we write our own frame. Without
-# this, Unsloth's GGUF export produces a file whose chat template metadata isn't
-# reliably propagated and Ollama's default frame doesn't match how the model was
-# trained — the model generates but never emits <end_of_turn>.
-MODELFILE_TEMPLATE = '''FROM __GGUF_PATH__
-TEMPLATE """{{- range $i, $_ := .Messages }}
-{{- $last := eq (len (slice $.Messages $i)) 1 -}}
-<start_of_turn>{{ if eq .Role "user" }}user
-{{ else }}model
-{{ end }}
-{{- if and (eq .Role "user") (eq $i 0) $.System }}{{ $.System }}
 
-{{ end }}{{ .Content }}<end_of_turn>
-{{ if $last }}<start_of_turn>model
-{{ end }}
-{{- end }}"""
-PARAMETER stop "<end_of_turn>"
-PARAMETER stop "<start_of_turn>"
-PARAMETER temperature 0.7
-PARAMETER top_k 64
-PARAMETER top_p 0.9
-PARAMETER repeat_penalty 1.0
-PARAMETER num_ctx 32768
-PARAMETER num_predict 8192
-'''
+def _render_params(params):
+    return "\n".join(f"PARAMETER {k} {v}" for k, v in params.items())
 
-# Agent overlay Modelfile — FROM the chat model, with tool-calling-friendly sampling
-# params and the agent system prompt baked in. Overrides the chat params inherited
-# from the base.
-AGENT_OVERLAY_TEMPLATE = '''FROM __BASE_MODEL__
-PARAMETER stop "<end_of_turn>"
-PARAMETER stop "<start_of_turn>"
-PARAMETER temperature 0.2
-PARAMETER top_k 40
-PARAMETER top_p 0.9
-PARAMETER repeat_penalty 1.05
-PARAMETER num_predict 8192
-'''
+
+def _render_stops():
+    return "\n".join(f'PARAMETER stop "{s}"' for s in MODELFILE_STOP_TOKENS)
 
 
 def _build_modelfile(gguf_path, system_prompt):
-    body = MODELFILE_TEMPLATE.replace("__GGUF_PATH__", str(gguf_path))
-    return body.rstrip() + f'\n\nSYSTEM """{system_prompt}"""\n'
+    # Explicit chat template + sampling params from config. Without our own
+    # TEMPLATE, Unsloth's GGUF export produces a file whose chat-template
+    # metadata isn't reliably propagated and Ollama's default frame doesn't
+    # match how the model was trained.
+    return (
+        f"FROM {gguf_path}\n"
+        f'TEMPLATE """{MODELFILE_CHAT_TEMPLATE}"""\n'
+        f"{_render_stops()}\n"
+        f"{_render_params(MODELFILE_SAMPLING_CHAT)}\n"
+        f'\nSYSTEM """{system_prompt}"""\n'
+    )
 
 
 def _build_agent_overlay(base_model, agent_prompt):
-    body = AGENT_OVERLAY_TEMPLATE.replace("__BASE_MODEL__", base_model)
-    return body.rstrip() + f'\n\nSYSTEM """{agent_prompt}"""\n'
+    # Overlay overrides chat sampling for tool-calling determinism. TEMPLATE
+    # and num_ctx inherit from the base.
+    return (
+        f"FROM {base_model}\n"
+        f"{_render_stops()}\n"
+        f"{_render_params(MODELFILE_SAMPLING_AGENT)}\n"
+        f'\nSYSTEM """{agent_prompt}"""\n'
+    )
 
 
 def _convert_hf_to_gguf(model_dir, outfile):

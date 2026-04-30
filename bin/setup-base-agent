@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 # One-off bootstrap for the base-agent overlay on Ollama.
 #
-# Creates `gemma4-agent` = FROM gemma4 + tool-calling sampling params + agent
-# system prompt. Then aliases `cortex-agent` to it if no real cortex-agent is
-# already registered. Idempotent — safe to re-run.
+# Creates `${BASE_AGENT_OVERLAY_NAME}` = FROM ${BASE_OLLAMA_MODEL} + tool-calling
+# sampling params + agent system prompt. Then aliases `cortex-agent` to it if
+# no real cortex-agent is already registered. Idempotent — safe to re-run.
 #
 # After a fine-tune is exported and `make register` runs, the cortex-agent
 # alias is overwritten with the real `FROM cortex` overlay; this script's
-# cortex-agent step becomes a no-op and the base gemma4-agent is left alone.
+# cortex-agent step becomes a no-op and the base agent overlay is left alone.
+#
+# Names default to the qwen pair below; override via env vars if you maintain
+# multiple agent overlays. Keep defaults in sync with:
+#   - cortex/finetune/config.py (BASE_OLLAMA_MODEL, BASE_AGENT_OVERLAY_NAME)
+#   - cortex/finetune/Makefile
+#   - alexdlaird/tools/init/dev-init-ai
 
 set -euo pipefail
+
+BASE_OLLAMA_MODEL="${BASE_OLLAMA_MODEL:-qwen}"
+BASE_AGENT_OVERLAY_NAME="${BASE_AGENT_OVERLAY_NAME:-qwen-agent}"
 
 DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]:-$0}" )" &> /dev/null && pwd )
 AGENT_PROMPT_FILE="$DIR/../prompts/agent_system_prompt.txt"
@@ -24,17 +33,18 @@ if [[ ! -f "$AGENT_PROMPT_FILE" ]]; then
   exit 1
 fi
 
-if ! ollama list | awk 'NR>1 {print $1}' | grep -qE '^gemma4(:|$)'; then
-  echo "--> pulling gemma4 base model ..."
-  ollama pull gemma4
+if ! ollama list | awk 'NR>1 {print $1}' | grep -qE "^${BASE_OLLAMA_MODEL}(:|$)"; then
+  echo "error: base model '${BASE_OLLAMA_MODEL}' not found in ollama. Pull it first" >&2
+  echo "       (e.g., 'ollama pull qwen3.6:27b && ollama cp qwen3.6:27b ${BASE_OLLAMA_MODEL}')" >&2
+  exit 1
 fi
 
-echo "--> creating gemma4-agent overlay ..."
+echo "--> creating ${BASE_AGENT_OVERLAY_NAME} overlay (FROM ${BASE_OLLAMA_MODEL}) ..."
 AGENT_MODELFILE=$(mktemp)
 trap 'rm -f "$AGENT_MODELFILE"' EXIT
 {
-  cat <<'EOF'
-FROM gemma4
+  cat <<EOF
+FROM ${BASE_OLLAMA_MODEL}
 PARAMETER temperature 0.2
 PARAMETER top_p 0.9
 PARAMETER top_k 40
@@ -45,11 +55,11 @@ EOF
   cat "$AGENT_PROMPT_FILE"
   echo '"""'
 } > "$AGENT_MODELFILE"
-ollama create gemma4-agent -f "$AGENT_MODELFILE"
+ollama create "${BASE_AGENT_OVERLAY_NAME}" -f "$AGENT_MODELFILE"
 
 if ! ollama list | awk 'NR>1 {print $1}' | grep -qE '^cortex-agent(:|$)'; then
-  echo "--> aliasing cortex-agent -> gemma4-agent ..."
-  ollama cp gemma4-agent cortex-agent
+  echo "--> aliasing cortex-agent -> ${BASE_AGENT_OVERLAY_NAME} ..."
+  ollama cp "${BASE_AGENT_OVERLAY_NAME}" cortex-agent
 else
   echo "--> cortex-agent already registered, leaving alone"
 fi

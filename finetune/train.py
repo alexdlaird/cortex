@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path.cwd()))
 
 from run_helper import banner, follow
 from config import (
+    CHAT_TEMPLATE,
     FINETUNE_DATA_DIR,
     FINETUNE_OUTPUT_DIR,
     GRADIENT_ACCUMULATION_STEPS,
@@ -72,10 +73,11 @@ def resolve_pretrain_adapter_path(output_path, pretrain_adapter_path=None, base_
     if _has_saved_artifacts(candidate):
         return candidate
 
-    raise FileNotFoundError(
-        f"Missing required pre-train adapter: {candidate}. "
-        "Run pretrain_tone.py first or pass --base-only to skip tone pre-training."
+    logger.info(
+        f"No pre-train adapter at {candidate}; starting from base {HF_MODEL_ID}. "
+        "Run pretrain_tone.py first for a tone-adapted starting point."
     )
+    return None
 
 
 def load_model_and_tokenizer(pretrain_adapter_path=None):
@@ -116,7 +118,7 @@ def train(data_path, output_path, resume, pretrain_adapter_path=None, base_only=
         base_only=base_only,
     )
     model, tokenizer = load_model_and_tokenizer(pretrain_adapter_path=resolved_pretrain_adapter)
-    tokenizer = get_chat_template(tokenizer, chat_template="gemma")
+    tokenizer = get_chat_template(tokenizer, chat_template=CHAT_TEMPLATE)
 
     logger.info(f"Loading training data: {data_path}")
     dataset = load_dataset("json", data_files=str(data_path), split="train")
@@ -211,7 +213,7 @@ def train_and_merge(data_path, output_path, resume, pretrain_adapter_path=None, 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    parser = argparse.ArgumentParser(description="Fine-tune Gemma 4 with QLoRA via Unsloth.")
+    parser = argparse.ArgumentParser(description="Fine-tune the cortex base model with QLoRA via Unsloth.")
     parser.add_argument("--data", type=Path, default=None, help="Path to sharegpt.jsonl")
     parser.add_argument("--output", type=Path, default=None, help="Output directory for adapter")
     parser.add_argument("--resume", action="store_true", help="Resume from existing checkpoint")

@@ -14,6 +14,14 @@ SAMPLE_EVERY    ?= 1
 LIMIT           ?= 0
 PIPELINE_SESSION ?= cortex-retrain
 
+# Stable Ollama identifiers for the fine-tune base + agent overlay. Keep in
+# sync with config.py's BASE_OLLAMA_MODEL / BASE_AGENT_OVERLAY_NAME and with
+# tools/init/dev-init-ai. To bump base model versions, change config.py and
+# re-pull into Ollama under the same alias (e.g.,
+# `ollama pull qwen-next:tag && ollama cp qwen-next:tag qwen`).
+BASE_OLLAMA_MODEL       ?= qwen
+BASE_AGENT_OVERLAY_NAME ?= qwen-agent
+
 # Set NO_INSTALL=1 to drop install/pull-blog deps from per-stage targets. The
 # pipeline sets this after prefetch has populated everything, so each stage
 # can run offline. Standalone invocations (`make train`, etc.) still install.
@@ -48,10 +56,10 @@ install: pull venv
 
 # Front-loads every internet-dependent artifact: git refs, pip wheels, HF model
 # weights. Run once before pipeline-bg so the multi-day body runs offline. The
-# from_pretrained call mirrors train.py/pretrain_tone.py exactly so Unsloth
-# pulls the full set (google/gemma-4-31B-it, unsloth/gemma-4-31b-it, and the
-# unsloth/gemma-4-31b-it-unsloth-bnb-4bit quantized weights, ~136GB total).
-prefetch: install pull-blog
+# from_pretrained call mirrors train.py exactly so Unsloth pulls the full set
+# of repos it would pull at training time (the source ID, Unsloth's bf16
+# mirror, and the bnb-4bit quantized weights).
+prefetch: install
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
 		python -c "from unsloth import FastLanguageModel; from config import HF_MODEL_ID, MAX_SEQ_LENGTH; FastLanguageModel.from_pretrained(model_name=HF_MODEL_ID, max_seq_length=MAX_SEQ_LENGTH, dtype=None, load_in_4bit=True)"; \
@@ -102,7 +110,7 @@ export: $(INSTALL_DEP)
 	)
 
 setup-base-agent: pull
-	@# One-off bootstrap: create gemma4-agent overlay + cortex-agent alias.
+	@# One-off bootstrap: create $(BASE_AGENT_OVERLAY_NAME) overlay + cortex-agent alias.
 	@# Idempotent. Safe to re-run on an already-configured machine.
 	$(CORTEX_DIR)/bin/setup-base-agent
 	@$(MAKE) --no-print-directory probe
@@ -113,8 +121,8 @@ unregister:
 	@# Re-alias the agent name back to the base overlay so pi/opencode keep
 	@# working with the same client config after the fine-tune is removed. The
 	@# chat-facing $(MODEL_NAME) stays absent; pipeline.py's _resolve_model()
-	@# falls back to plain gemma4 on the chat path.
-	ollama cp gemma4-agent $(MODEL_NAME)-agent
+	@# falls back to plain gemma on the chat path.
+	ollama cp $(BASE_AGENT_OVERLAY_NAME) $(MODEL_NAME)-agent
 	docker restart pipelines
 
 register:
@@ -147,14 +155,15 @@ smoke-test:
 	fi; \
 	echo "--> smoke test passed (done_reason=stop)"
 
-# Tool-calling reliability probe against $(MODEL_NAME)-agent. Verifies the agent
-# overlay (gemma4-agent or real cortex-agent) emits structured tool_calls — the
-# failure mode we saw with temp=1.0 baked into the base Modelfile.
+# Tool-calling reliability probe against $(MODEL_NAME)-agent. Verifies the
+# agent overlay ($(BASE_AGENT_OVERLAY_NAME) or real cortex-agent) emits
+# structured tool_calls — the failure mode we saw with temp=1.0 baked into the
+# base Modelfile.
 probe: pull
 	@echo "--> probing $(MODEL_NAME)-agent for tool-calling reliability ..."
 	$(CORTEX_DIR)/tests/tool_call_probe.sh $(MODEL_NAME)-agent 10 http://localhost:11434
 
-# Full unattended retrain: ingest → pretrain-tone → generate-data → train → export → register.
+# Full unattended retrain: ingest → generate-data → train → export → register.
 # Spawns a detached tmux session running pipeline-bg and tails the log. Ctrl-C
 # stops the tail; the tmux session keeps running. Reattach via:
 #   tmux attach -t $(PIPELINE_SESSION)
@@ -173,21 +182,26 @@ pipeline:
 	@PANE_PID=$$(tmux list-panes -t $(PIPELINE_SESSION) -F "#{pane_pid}" 2>/dev/null | head -1); \
 	  exec tail -f $${PANE_PID:+--pid=$$PANE_PID} $(LOG_DIR)/pipeline.log
 
-# The actual chain. Halts on first failure. Ollama models are evicted between
-# Ollama-using and HuggingFace-using stages to avoid VRAM contention with the
-# 31B Gemma 4 load. Invoked inside the tmux session by `make pipeline`.
+# The actual chain. Halts on first failure. The teacher model
+# ($(BASE_OLLAMA_MODEL)) is stopped between generate-data and train to free
+# VRAM for the HuggingFace 4-bit load. Invoked inside the tmux session by
+# `make pipeline`.
 #
 # Prefetch front-loads everything internet-dependent so the body can survive a
 # net outage. Each stage runs with NO_INSTALL=1 (skips install/pull deps) and
 # OFFLINE_ENV (HF/pip refuse network) to fail fast if something tries to phone
 # home. register's probe step intentionally still does git pull — if net is out
 # at the very end, re-run `make probe` once it's back.
+#
+# pretrain-tone is intentionally not in this chain. It pre-trains a tone
+# adapter from blog content; for an agent-style coding assistant, that biases
+# toward verbose prose and is off-distribution from real agent use. To opt in,
+# run `make pretrain-tone` manually before `make pipeline`.
 pipeline-bg: prefetch
 	$(OFFLINE_ENV) $(MAKE) --no-print-directory ingest NO_INSTALL=1
 	-@ollama stop nomic-embed-text 2>/dev/null
-	$(OFFLINE_ENV) $(MAKE) --no-print-directory pretrain-tone NO_INSTALL=1
 	$(OFFLINE_ENV) $(MAKE) --no-print-directory generate-data NO_INSTALL=1
-	-@ollama stop gemma4 2>/dev/null
+	-@ollama stop $(BASE_OLLAMA_MODEL) 2>/dev/null
 	$(OFFLINE_ENV) $(MAKE) --no-print-directory train NO_INSTALL=1
 	$(OFFLINE_ENV) $(MAKE) --no-print-directory export NO_INSTALL=1
 	$(OFFLINE_ENV) $(MAKE) --no-print-directory register NO_INSTALL=1
