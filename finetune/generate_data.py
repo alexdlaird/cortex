@@ -105,9 +105,15 @@ def _parse_json_response(content):
 
 
 def _post_chat(ollama_base_url, model, chunk_text):
+    # think=false on the teacher call. Extractive Q&A has nothing to reason about,
+    # the <think> block is discarded by _parse_json_response anyway, and leaving it
+    # on costs ~10x wallclock on Qwen 3.6 (25-75s of thinking before 200 tokens of
+    # JSON). Inference-time thinking on the exported cortex model is unaffected —
+    # that's controlled by the Modelfile, not the training data.
     payload = {
         "model": model,
         "stream": False,
+        "think": False,
         "messages": [
             {"role": "system", "content": GENERATION_PROMPT},
             {"role": "user", "content": chunk_text},
