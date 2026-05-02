@@ -88,7 +88,7 @@ pretrain-tone: $(INSTALL_DEP) $(PULL_BLOG_DEP) ollama-sweep
 		python $(CORTEX_DIR)/finetune/pretrain_tone.py; \
 	)
 
-generate-data: $(INSTALL_DEP)
+generate-data: $(INSTALL_DEP) ollama-sweep
 	@mkdir -p $(LOG_DIR)
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
@@ -133,14 +133,23 @@ setup-base-agent: pull
 # killed, the worker survives as an orphan under PID 1 and keeps hitting
 # Ollama, which re-warms the teacher model and makes `ollama stop` ineffective
 # until the orphan dies. SIGTERM first; SIGKILL the holdouts after a beat.
+#
+# SKIP_SWEEP=1 short-circuits this target. pipeline-bg sets it for stages
+# whose sweep would be redundant (the previous stage already left the GPU
+# clean), avoiding a spurious eviction of nomic-embed-text or the qwen
+# teacher between in-pipeline stages.
 ollama-sweep:
+ifeq ($(SKIP_SWEEP),1)
+	@echo "==> Skipping ollama-sweep (SKIP_SWEEP=1)."
+else
 	-@pkill -TERM -f 'cortex/finetune/(generate_data|train|export|pretrain_tone)\.py' 2>/dev/null
 	-@sleep 2
 	-@pkill -KILL -f 'cortex/finetune/(generate_data|train|export|pretrain_tone)\.py' 2>/dev/null
 	-@ollama ps 2>/dev/null | awk 'NR>1 {print $$1}' | xargs -r -n1 ollama stop 2>/dev/null
 	-@sleep 1
+endif
 
-unregister:
+unregister: ollama-sweep
 	-@ollama rm $(MODEL_NAME) 2>/dev/null
 	-@ollama rm $(MODEL_NAME)-agent 2>/dev/null
 	@# Re-alias the agent name back to the base overlay so pi/opencode keep
@@ -215,6 +224,12 @@ endef
 # pipeline-stop  — detect current stage; kill if resumable, prompt if not,
 #                   refuse if export/register are running (almost done)
 pipeline:
+	@if tmux has-session -t $(PIPELINE_SESSION) 2>/dev/null; then \
+		echo "!!> Pipeline session '$(PIPELINE_SESSION)' is already running."; \
+		echo "    Refusing to clear state for a fresh start while a run is live."; \
+		echo "    Run 'make pipeline-stop' first, or 'make pipeline-resume' to attach."; \
+		exit 1; \
+	fi
 	@mkdir -p $(LOG_DIR) $(PIPELINE_MARK_DIR)
 	@rm -f $(PIPELINE_MARK_DIR)/*.done $(PIPELINE_MARK_DIR)/*.running
 	@$(PROJECT_VENV)/bin/python -c "from config import FINETUNE_DATA_DIR; (FINETUNE_DATA_DIR / 'sharegpt.jsonl').unlink(missing_ok=True)" 2>/dev/null || true
@@ -291,7 +306,7 @@ pipeline-stop:
 # run `make pretrain-tone` manually before `make pipeline`.
 pipeline-bg: prefetch
 	$(call run_stage,ingest,$(OFFLINE_ENV) $(MAKE) --no-print-directory ingest NO_INSTALL=1)
-	$(call run_stage,generate-data,$(OFFLINE_ENV) $(MAKE) --no-print-directory generate-data NO_INSTALL=1 APPEND=1)
+	$(call run_stage,generate-data,$(OFFLINE_ENV) $(MAKE) --no-print-directory generate-data NO_INSTALL=1 APPEND=1 SKIP_SWEEP=1)
 	$(call run_stage,train,$(OFFLINE_ENV) $(MAKE) --no-print-directory train NO_INSTALL=1 RESUME=1)
 	$(call run_stage,export,$(OFFLINE_ENV) $(MAKE) --no-print-directory export NO_INSTALL=1)
 	$(call run_stage,register,$(OFFLINE_ENV) $(MAKE) --no-print-directory register NO_INSTALL=1)
