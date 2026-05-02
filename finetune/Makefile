@@ -124,11 +124,19 @@ setup-base-agent: pull
 	$(CORTEX_DIR)/bin/setup-base-agent
 	@$(MAKE) --no-print-directory probe
 
-# Sweep every warm model off the GPU. Used as a prereq to GPU-heavy training
-# stages so external clients (Open WebUI, opencode, pi) can't strand a model
-# in VRAM and blow the trainer's memory budget. `ollama stop` returns once the
-# runner is signaled; the sleep covers the ~1–2s VRAM-release lag.
+# Sweep every warm model off the GPU and kill any orphaned finetune python
+# workers. Used as a prereq to GPU-heavy stages so external clients (Open
+# WebUI, opencode, pi) can't strand a model in VRAM and blow the budget.
+#
+# generate_data.py / pretrain_tone.py / train.py / export.py all daemonize a
+# `--bg` worker via subprocess.Popen(start_new_session=True). When tmux is
+# killed, the worker survives as an orphan under PID 1 and keeps hitting
+# Ollama, which re-warms the teacher model and makes `ollama stop` ineffective
+# until the orphan dies. SIGTERM first; SIGKILL the holdouts after a beat.
 ollama-sweep:
+	-@pkill -TERM -f 'cortex/finetune/(generate_data|train|export|pretrain_tone)\.py' 2>/dev/null
+	-@sleep 2
+	-@pkill -KILL -f 'cortex/finetune/(generate_data|train|export|pretrain_tone)\.py' 2>/dev/null
 	-@ollama ps 2>/dev/null | awk 'NR>1 {print $$1}' | xargs -r -n1 ollama stop 2>/dev/null
 	-@sleep 1
 
