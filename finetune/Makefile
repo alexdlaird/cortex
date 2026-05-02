@@ -1,4 +1,4 @@
-.PHONY: all pull pull-blog install prefetch nopyc clean ingest pretrain-tone generate-data train export register unregister smoke-test probe setup-base-agent ollama-sweep pipeline pipeline-bg
+.PHONY: all pull pull-blog install prefetch nopyc clean ingest pretrain-tone generate-data train export register unregister smoke-test probe setup-base-agent ollama-sweep pipeline pipeline-resume pipeline-stop pipeline-bg _pipeline-launch
 
 LOG_DIR := logs
 
@@ -13,6 +13,9 @@ INCLUDE_TESTS   ?= false
 SAMPLE_EVERY    ?= 1
 LIMIT           ?= 0
 PIPELINE_SESSION ?= cortex-retrain
+PIPELINE_MARK_DIR := $(LOG_DIR)/.pipeline
+APPEND        ?=
+RESUME        ?=
 
 # Stable Ollama identifiers for the fine-tune base + agent overlay. Keep in
 # sync with config.py's BASE_OLLAMA_MODEL / BASE_AGENT_OVERLAY_NAME and with
@@ -88,13 +91,15 @@ generate-data: $(INSTALL_DEP)
 		python $(CORTEX_DIR)/finetune/generate_data.py \
 			--sample-every $(SAMPLE_EVERY) \
 			$(if $(filter-out 0,$(LIMIT)),--limit $(LIMIT),) \
-			$(if $(filter true,$(INCLUDE_TESTS)),--include-tests,); \
+			$(if $(filter true,$(INCLUDE_TESTS)),--include-tests,) \
+			$(if $(filter 1,$(APPEND)),--append,); \
 	)
 
 train: $(INSTALL_DEP) ollama-sweep
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
-		python $(CORTEX_DIR)/finetune/train.py; \
+		python $(CORTEX_DIR)/finetune/train.py \
+			$(if $(filter 1,$(RESUME)),--resume,); \
 	)
 
 train-merge: $(INSTALL_DEP) ollama-sweep
@@ -171,13 +176,43 @@ probe: pull
 	@echo "--> probing $(MODEL_NAME)-agent for tool-calling reliability ..."
 	$(CORTEX_DIR)/tests/tool_call_probe.sh $(MODEL_NAME)-agent 10 http://localhost:11434
 
+# Run a pipeline stage with marker tracking. Skips if .done exists (resume);
+# leaves a .running marker so pipeline-stop can identify the active stage.
+# $1 = stage name (used for marker filename)
+# $2 = command to invoke the stage
+define run_stage
+	@if [ -f $(PIPELINE_MARK_DIR)/$(1).done ]; then \
+		echo "==> Skipping $(1) (already complete)."; \
+	else \
+		mkdir -p $(PIPELINE_MARK_DIR) && touch $(PIPELINE_MARK_DIR)/$(1).running; \
+		$(2) && rm -f $(PIPELINE_MARK_DIR)/$(1).running && touch $(PIPELINE_MARK_DIR)/$(1).done; \
+	fi
+
+endef
+
 # Full unattended retrain: ingest → generate-data → train → export → register.
 # Spawns a detached tmux session running pipeline-bg and tails the log. Ctrl-C
 # stops the tail; the tmux session keeps running. Reattach via:
 #   tmux attach -t $(PIPELINE_SESSION)
 # Override SAMPLE_EVERY for a faster validation pass: make pipeline SAMPLE_EVERY=10
+#
+# pipeline       — fresh start: clears stage markers and sharegpt.jsonl
+# pipeline-resume — picks up where a crashed/stopped run left off; completed
+#                   stages are skipped, generate-data appends + dedupes, train
+#                   resumes from its HF Trainer checkpoint
+# pipeline-stop  — detect current stage; kill if resumable, prompt if not,
+#                   refuse if export/register are running (almost done)
 pipeline:
-	@mkdir -p $(LOG_DIR)
+	@mkdir -p $(LOG_DIR) $(PIPELINE_MARK_DIR)
+	@rm -f $(PIPELINE_MARK_DIR)/*.done $(PIPELINE_MARK_DIR)/*.running
+	@$(PROJECT_VENV)/bin/python -c "from config import FINETUNE_DATA_DIR; (FINETUNE_DATA_DIR / 'sharegpt.jsonl').unlink(missing_ok=True)" 2>/dev/null || true
+	@$(MAKE) --no-print-directory _pipeline-launch
+
+pipeline-resume:
+	@mkdir -p $(LOG_DIR) $(PIPELINE_MARK_DIR)
+	@$(MAKE) --no-print-directory _pipeline-launch
+
+_pipeline-launch:
 	@if tmux has-session -t $(PIPELINE_SESSION) 2>/dev/null; then \
 		echo "--> tmux session '$(PIPELINE_SESSION)' already exists; tailing existing log."; \
 	else \
@@ -190,10 +225,37 @@ pipeline:
 	@PANE_PID=$$(tmux list-panes -t $(PIPELINE_SESSION) -F "#{pane_pid}" 2>/dev/null | head -1); \
 	  exec tail -f $${PANE_PID:+--pid=$$PANE_PID} $(LOG_DIR)/pipeline.log
 
+pipeline-stop:
+	@if ! tmux has-session -t $(PIPELINE_SESSION) 2>/dev/null; then \
+		echo "--> No pipeline session running."; \
+		exit 0; \
+	fi
+	@RUNNING=""; for f in $(PIPELINE_MARK_DIR)/*.running; do \
+		[ -f "$$f" ] || continue; \
+		RUNNING=$$(basename "$$f" .running); break; \
+	done; \
+	case "$$RUNNING" in \
+		export|register) \
+			echo "--> Pipeline is in '$$RUNNING' stage — almost complete."; \
+			echo "    Refusing to stop; just wait it out (minutes, not hours)."; \
+			exit 1; ;; \
+		generate-data|train) \
+			echo "--> Pipeline is in '$$RUNNING' stage (resumable)."; ;; \
+		ingest) \
+			echo "!!> Pipeline is in 'ingest' stage (NOT resumable — qdrant rebuilds from scratch)."; \
+			printf "    Stop anyway? [y/N] "; read ans </dev/tty || ans=n; \
+			[ "$$ans" = "y" ] || { echo "    Aborted."; exit 1; }; ;; \
+		*) \
+			echo "--> No active stage marker; pipeline is between stages or in prefetch."; \
+			printf "    Stop anyway? [y/N] "; read ans </dev/tty || ans=n; \
+			[ "$$ans" = "y" ] || { echo "    Aborted."; exit 1; }; ;; \
+	esac; \
+	tmux kill-session -t $(PIPELINE_SESSION) && echo "--> Pipeline stopped. Resume with 'make pipeline-resume'."
+
 # The actual chain. Halts on first failure. Train and register declare
 # ollama-sweep as a prereq, so the teacher model ($(BASE_OLLAMA_MODEL)) and
 # any other warm Ollama model are evicted before the HuggingFace 4-bit load.
-# Invoked inside the tmux session by `make pipeline`.
+# Invoked inside the tmux session by `make pipeline` / `make pipeline-resume`.
 #
 # Prefetch front-loads everything internet-dependent so the body can survive a
 # net outage. Each stage runs with NO_INSTALL=1 (skips install/pull deps) and
@@ -201,13 +263,20 @@ pipeline:
 # home. register's probe step intentionally still does git pull — if net is out
 # at the very end, re-run `make probe` once it's back.
 #
+# Each stage is wrapped in run_stage so a .done marker lets pipeline-resume
+# skip it next time. generate-data always passes APPEND=1; on a fresh run the
+# pipeline target deleted sharegpt.jsonl, so the appender starts clean and
+# prepends seeds. On resume, existing pairs are loaded into seen_questions
+# for dedupe. train always passes RESUME=1; train.py is a no-op on that flag
+# when no checkpoint exists.
+#
 # pretrain-tone is intentionally not in this chain. It pre-trains a tone
 # adapter from blog content; for an agent-style coding assistant, that biases
 # toward verbose prose and is off-distribution from real agent use. To opt in,
 # run `make pretrain-tone` manually before `make pipeline`.
 pipeline-bg: prefetch
-	$(OFFLINE_ENV) $(MAKE) --no-print-directory ingest NO_INSTALL=1
-	$(OFFLINE_ENV) $(MAKE) --no-print-directory generate-data NO_INSTALL=1
-	$(OFFLINE_ENV) $(MAKE) --no-print-directory train NO_INSTALL=1
-	$(OFFLINE_ENV) $(MAKE) --no-print-directory export NO_INSTALL=1
-	$(OFFLINE_ENV) $(MAKE) --no-print-directory register NO_INSTALL=1
+	$(call run_stage,ingest,$(OFFLINE_ENV) $(MAKE) --no-print-directory ingest NO_INSTALL=1)
+	$(call run_stage,generate-data,$(OFFLINE_ENV) $(MAKE) --no-print-directory generate-data NO_INSTALL=1 APPEND=1)
+	$(call run_stage,train,$(OFFLINE_ENV) $(MAKE) --no-print-directory train NO_INSTALL=1 RESUME=1)
+	$(call run_stage,export,$(OFFLINE_ENV) $(MAKE) --no-print-directory export NO_INSTALL=1)
+	$(call run_stage,register,$(OFFLINE_ENV) $(MAKE) --no-print-directory register NO_INSTALL=1)

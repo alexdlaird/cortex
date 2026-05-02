@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd()))
@@ -36,9 +37,10 @@ GENERATION_PROMPT = (
     "{\"question\": \"...\", \"answer\": \"...\"}"
 )
 
-REQUEST_TIMEOUT = 60
+REQUEST_TIMEOUT = 180
 MAX_ATTEMPTS = 3
 CONSECUTIVE_FAILURE_LIMIT = 10
+PROGRESS_EVERY = 50
 
 
 def scroll_chunks(client, collection, sample_every, include_tests=False):
@@ -155,12 +157,32 @@ def to_sharegpt(question, answer):
     ]}
 
 
+def _format_eta(seconds):
+    if seconds <= 0:
+        return "0:00:00"
+    hours, rem = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
+def _count_total_chunks(client, collection, sample_every, limit, include_tests):
+    scroll_filter = None if include_tests else Filter(
+        must=[FieldCondition(key="chunk_type", match=MatchValue(value="source"))]
+    )
+    total = client.count(collection_name=collection, count_filter=scroll_filter).count
+    sampled = max(total // max(sample_every, 1), 1)
+    if limit:
+        sampled = min(sampled, limit)
+    return sampled
+
+
 def generate_data(collection, limit, sample_every, output_path, ollama_base_url, model, append, seed_path, include_tests=False):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if append else "w"
+    is_new_file = mode == "w" or not output_path.exists() or output_path.stat().st_size == 0
 
     seen_questions = set()
-    if append and output_path.exists():
+    if not is_new_file:
         with open(output_path) as f:
             for line in f:
                 try:
@@ -170,13 +192,18 @@ def generate_data(collection, limit, sample_every, output_path, ollama_base_url,
                         seen_questions.add(q)
                 except Exception:
                     pass
+        logger.info(f"Resuming from {output_path}: {len(seen_questions)} existing questions loaded.")
 
     client = QdrantClient(url=QDRANT_URL)
+    sampled_chunks = _count_total_chunks(client, collection, sample_every, limit, include_tests)
+    logger.info(f"Will process up to {sampled_chunks:,} chunks from collection '{collection}'.")
+
     total, skipped, written = 0, 0, 0
     consecutive_failures = 0
+    start = time.monotonic()
 
     with open(output_path, mode) as out:
-        if not append:
+        if is_new_file:
             for path in (seed_path if isinstance(seed_path, list) else [seed_path]):
                 seed_pairs = load_seed_pairs(path)
                 for record in seed_pairs:
@@ -213,10 +240,20 @@ def generate_data(collection, limit, sample_every, output_path, ollama_base_url,
 
             seen_questions.add(question)
             out.write(json.dumps(to_sharegpt(question, answer)) + "\n")
+            out.flush()
             written += 1
 
-            if written % 50 == 0:
-                logger.info(f"  {written} pairs written ({skipped} skipped) ...")
+            if written % PROGRESS_EVERY == 0:
+                elapsed = time.monotonic() - start
+                rate = total / elapsed if elapsed > 0 else 0
+                remaining = max(sampled_chunks - total, 0)
+                eta = remaining / rate if rate > 0 else 0
+                pct = 100 * total / sampled_chunks if sampled_chunks else 0
+                logger.info(
+                    f"  {written} pairs written ({skipped} skipped) — "
+                    f"{pct:.1f}% ({total:,}/{sampled_chunks:,}), "
+                    f"{rate:.2f} chunks/s, ETA {_format_eta(eta)}"
+                )
 
     logger.info(f"Done — {written} pairs written to {output_path} ({skipped} skipped out of {total} chunks)")
 
