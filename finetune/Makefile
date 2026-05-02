@@ -62,7 +62,11 @@ install: pull venv
 # from_pretrained call mirrors train.py exactly so Unsloth pulls the full set
 # of repos it would pull at training time (the source ID, Unsloth's bf16
 # mirror, and the bnb-4bit quantized weights).
-prefetch: install
+#
+# ollama-sweep is a prereq because the load_in_4bit sanity-allocates the model
+# on GPU; if the qwen teacher is still warm, bnb-4bit can't fit 27B in the
+# remaining VRAM and dispatches layers to CPU/disk, which 4-bit refuses.
+prefetch: install ollama-sweep
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
 		python -c "from unsloth import FastLanguageModel; from config import HF_MODEL_ID, MAX_SEQ_LENGTH; FastLanguageModel.from_pretrained(model_name=HF_MODEL_ID, max_seq_length=MAX_SEQ_LENGTH, dtype=None, load_in_4bit=True)"; \
@@ -250,7 +254,10 @@ pipeline-stop:
 			printf "    Stop anyway? [y/N] "; read ans </dev/tty || ans=n; \
 			[ "$$ans" = "y" ] || { echo "    Aborted."; exit 1; }; ;; \
 	esac; \
-	tmux kill-session -t $(PIPELINE_SESSION) && echo "--> Pipeline stopped. Resume with 'make pipeline-resume'."
+	tmux kill-session -t $(PIPELINE_SESSION); \
+	sleep 2; \
+	$(MAKE) --no-print-directory ollama-sweep; \
+	echo "--> Pipeline stopped (ollama swept). Resume with 'make pipeline-resume'."
 
 # The actual chain. Halts on first failure. Train and register declare
 # ollama-sweep as a prereq, so the teacher model ($(BASE_OLLAMA_MODEL)) and
