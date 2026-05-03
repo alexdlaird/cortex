@@ -181,12 +181,24 @@ def train(data_path, output_path, resume, pretrain_adapter_path=None, base_only=
 
 
 def merge(output_path):
+    from huggingface_hub import snapshot_download
     from unsloth import FastLanguageModel
 
     adapter_path = output_path / "lora-adapter"
     merged_path = output_path / "merged"
 
     _clear_memory()
+
+    # Pre-resolve the base model from the HF cache so save_pretrained_merged
+    # works under HF_HUB_OFFLINE=1. Unsloth's determine_base_model_source
+    # (saving_utils.py) probes for the base model in two places — HF (network)
+    # and "local" (literal directory walk). The local probe has no awareness
+    # of the ~/.cache/huggingface/hub/models--*/snapshots/<sha>/ layout, so
+    # without this override both probes fail offline and save_pretrained_merged
+    # silently no-ops. Passing the snapshot dir as model.config._name_or_path
+    # lets the local-unquantized priority match.
+    base_local_path = snapshot_download(HF_MODEL_ID, local_files_only=True)
+    logger.info(f"Resolved base model from HF cache: {base_local_path}")
 
     model = None
     tokenizer = None
@@ -197,6 +209,7 @@ def merge(output_path):
             dtype=None,
             load_in_4bit=True,
         )
+        model.config._name_or_path = base_local_path
         _save_merged_model(model, tokenizer, merged_path)
     finally:
         del model

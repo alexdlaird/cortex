@@ -307,6 +307,12 @@ pipeline-stop:
 # Splitting it out also makes the pipeline restartable from after train without
 # rerunning the long step.
 #
+# merge runs offline like every other stage; train.py's merge() pre-resolves
+# the base model snapshot path from the HF cache before calling
+# save_pretrained_merged. Unsloth's saving path can't natively see the
+# ~/.cache/huggingface/hub/models--*/ layout — only its loading path can —
+# which is why we hand it the resolved snapshot dir explicitly.
+#
 # pretrain-tone is intentionally not in this chain. It pre-trains a tone
 # adapter from blog content; for an agent-style coding assistant, that biases
 # toward verbose prose and is off-distribution from real agent use. To opt in,
