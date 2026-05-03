@@ -49,8 +49,19 @@ def _clear_memory():
 
 
 def _save_merged_model(model, tokenizer, merged_path):
+    # Always run merge in a fresh process from a freshly-loaded adapter — never
+    # against the in-memory model returned by trainer.train(). Under TRL >=0.20,
+    # the post-train model is no longer the peft-wrapped variant Unsloth's merge
+    # path expects, and save_pretrained_merged silently no-ops. The assert below
+    # is the canary for that regression.
     logger.info(f"Merging adapter into full weights at {merged_path} ...")
     model.save_pretrained_merged(str(merged_path), tokenizer, save_method="merged_16bit")
+    if not merged_path.is_dir() or not any(merged_path.glob("*.safetensors")):
+        raise RuntimeError(
+            f"Merge produced no output at {merged_path}; "
+            "save_pretrained_merged returned without writing weights. "
+            "Run merge as a standalone process via `make merge`."
+        )
     logger.info("Merge complete.")
 
 
@@ -193,23 +204,6 @@ def merge(output_path):
         _clear_memory()
 
 
-def train_and_merge(data_path, output_path, resume, pretrain_adapter_path=None, base_only=False):
-    model, tokenizer = train(
-        data_path,
-        output_path,
-        resume,
-        pretrain_adapter_path=pretrain_adapter_path,
-        base_only=base_only,
-    )
-    try:
-        _clear_memory()
-        _save_merged_model(model, tokenizer, output_path / "merged")
-    finally:
-        del model
-        del tokenizer
-        _clear_memory()
-
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -236,7 +230,8 @@ if __name__ == "__main__":
     output_path = args.output or FINETUNE_OUTPUT_DIR
 
     if not args.bg:
-        log_path = Path("logs") / "train.log"
+        label = "merge" if args.merge_only else "train"
+        log_path = Path("logs") / f"{label}.log"
         log_path.parent.mkdir(exist_ok=True)
         cmd = [
             sys.executable, __file__,
@@ -254,14 +249,14 @@ if __name__ == "__main__":
             cmd += ["--merge-only"]
         with open(log_path, "w") as log_file:
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=log_file, start_new_session=True)
-        follow(proc, log_path, "train")
+        follow(proc, log_path, label)
     elif args.merge_only:
         banner("MERGE — STARTING")
         merge(output_path)
         banner("MERGE — DONE")
     else:
         banner("TRAIN — STARTING")
-        train_and_merge(
+        train(
             data_path,
             output_path,
             args.resume,

@@ -1,4 +1,4 @@
-.PHONY: all pull pull-blog install prefetch nopyc clean ingest pretrain-tone generate-data train export register unregister smoke-test probe setup-base-agent ollama-sweep pipeline pipeline-resume pipeline-stop pipeline-bg _pipeline-launch
+.PHONY: all pull pull-blog install prefetch nopyc clean ingest pretrain-tone generate-data train merge export register unregister smoke-test probe setup-base-agent ollama-sweep pipeline pipeline-resume pipeline-stop pipeline-bg _pipeline-launch
 
 LOG_DIR := logs
 
@@ -106,7 +106,7 @@ train: $(INSTALL_DEP) ollama-sweep
 			$(if $(filter 1,$(RESUME)),--resume,); \
 	)
 
-train-merge: $(INSTALL_DEP) ollama-sweep
+merge: $(INSTALL_DEP) ollama-sweep
 	@( \
 		source $(PROJECT_VENV)/bin/activate; \
 		python $(CORTEX_DIR)/finetune/train.py --merge-only; \
@@ -262,7 +262,7 @@ pipeline-stop:
 		RUNNING=$$(basename "$$f" .running); break; \
 	done; \
 	case "$$RUNNING" in \
-		export|register) \
+		merge|export|register) \
 			echo "--> Pipeline is in '$$RUNNING' stage — almost complete."; \
 			echo "    Refusing to stop; just wait it out (minutes, not hours)."; \
 			exit 1; ;; \
@@ -300,6 +300,13 @@ pipeline-stop:
 # for dedupe. train always passes RESUME=1; train.py is a no-op on that flag
 # when no checkpoint exists.
 #
+# merge is its own stage because Unsloth's save_pretrained_merged silently
+# no-ops on the post-train model object under recent TRL versions — the
+# fine-tuned weights are still there, but they need to be reloaded fresh as a
+# peft model in a new process before the merge will actually write anything.
+# Splitting it out also makes the pipeline restartable from after train without
+# rerunning the long step.
+#
 # pretrain-tone is intentionally not in this chain. It pre-trains a tone
 # adapter from blog content; for an agent-style coding assistant, that biases
 # toward verbose prose and is off-distribution from real agent use. To opt in,
@@ -308,5 +315,6 @@ pipeline-bg: prefetch
 	$(call run_stage,ingest,$(OFFLINE_ENV) $(MAKE) --no-print-directory ingest NO_INSTALL=1)
 	$(call run_stage,generate-data,$(OFFLINE_ENV) $(MAKE) --no-print-directory generate-data NO_INSTALL=1 APPEND=1 SKIP_SWEEP=1)
 	$(call run_stage,train,$(OFFLINE_ENV) $(MAKE) --no-print-directory train NO_INSTALL=1 RESUME=1)
+	$(call run_stage,merge,$(OFFLINE_ENV) $(MAKE) --no-print-directory merge NO_INSTALL=1)
 	$(call run_stage,export,$(OFFLINE_ENV) $(MAKE) --no-print-directory export NO_INSTALL=1)
 	$(call run_stage,register,$(OFFLINE_ENV) $(MAKE) --no-print-directory register NO_INSTALL=1)
