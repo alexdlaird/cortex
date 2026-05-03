@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path.cwd()))
 from config import (
     FINETUNE_OUTPUT_DIR,
     MODEL_SYSTEM_PROMPT,
-    MODELFILE_CHAT_TEMPLATE,
     MODELFILE_SAMPLING_AGENT,
     MODELFILE_SAMPLING_CHAT,
     MODELFILE_STOP_TOKENS,
@@ -38,13 +37,15 @@ def _render_stops():
 
 
 def _build_modelfile(gguf_path, system_prompt):
-    # Explicit chat template + sampling params from config. Without our own
-    # TEMPLATE, Unsloth's GGUF export produces a file whose chat-template
-    # metadata isn't reliably propagated and Ollama's default frame doesn't
-    # match how the model was trained.
+    # RENDERER/PARSER qwen3.5 are Ollama's native ChatML+tool-calling handlers
+    # — declared explicitly because convert_hf_to_gguf.py doesn't write the
+    # capability metadata Ollama uses to auto-detect them, and a hand-rolled
+    # TEMPLATE without `.Tools` rendering causes Ollama to reject any
+    # tools-bearing request with "does not support tools".
     return (
         f"FROM {gguf_path}\n"
-        f'TEMPLATE """{MODELFILE_CHAT_TEMPLATE}"""\n'
+        f"RENDERER qwen3.5\n"
+        f"PARSER qwen3.5\n"
         f"{_render_stops()}\n"
         f"{_render_params(MODELFILE_SAMPLING_CHAT)}\n"
         f'\nSYSTEM """{system_prompt}"""\n'
@@ -52,8 +53,8 @@ def _build_modelfile(gguf_path, system_prompt):
 
 
 def _build_agent_overlay(base_model, agent_prompt):
-    # Overlay overrides chat sampling for tool-calling determinism. TEMPLATE
-    # and num_ctx inherit from the base.
+    # Overlay overrides chat sampling for tool-calling determinism. RENDERER,
+    # PARSER, and num_ctx inherit from the base.
     return (
         f"FROM {base_model}\n"
         f"{_render_stops()}\n"
