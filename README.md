@@ -176,6 +176,31 @@ make register
 make probe
 ```
 
+#### Re-deploying after a prompt or sampling change (no retraining)
+
+When you edit `prompts/agent_system_prompt.txt` or any of the `MODELFILE_*` values
+in `config.py` — but the underlying model weights haven't changed — `make export`
+is the wrong tool: it would re-run the ~30-minute GGUF conversion just to rewrite
+two text files. Use `rebake` instead:
+
+```bash
+# One shot: regenerate Modelfiles from current config + prompts and re-register
+# cortex + cortex-agent. ~30 sec end-to-end.
+make rebake
+
+# Or the two steps separately if you want to inspect the regenerated Modelfiles
+# before re-registering:
+make modelfiles
+make register
+```
+
+`modelfiles` is the lower-level primitive — it rewrites `Modelfile` and
+`Modelfile.agent` from the current `config.py` and `prompts/agent_system_prompt.txt`,
+referencing the existing GGUF in `~/cortex-finetune/output/gguf/`. It fails if no
+GGUF is present (in which case you need `make export` first). Anything that affects
+the model weights themselves (new fine-tune, different quantization, new base model)
+still requires the full `make export` path.
+
 `make unregister` removes the fine-tuned `cortex` and `cortex-agent`, then re-aliases
 `cortex-agent` back to `gemma4-agent` so pi/opencode keep working against the base
 overlay.

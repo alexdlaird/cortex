@@ -78,6 +78,45 @@ def _quantize_gguf(infile, outfile, quant):
     subprocess.run(cmd, check=True)
 
 
+def _write_modelfiles(output_path, gguf_path, model_name):
+    modelfile_path = output_path / "Modelfile"
+    modelfile_path.write_text(_build_modelfile(gguf_path, MODEL_SYSTEM_PROMPT))
+
+    agent_prompt_path = Path(__file__).parent.parent / "prompts" / "agent_system_prompt.txt"
+    agent_prompt = agent_prompt_path.read_text().strip()
+    agent_modelfile_path = output_path / "Modelfile.agent"
+    agent_modelfile_path.write_text(_build_agent_overlay(model_name, agent_prompt))
+
+    logger.info(f"Modelfile written to {modelfile_path}")
+    logger.info(f"Agent overlay Modelfile written to {agent_modelfile_path}")
+    logger.info("")
+    logger.info("To register with Ollama, run:")
+    logger.info(f"  ollama create {model_name} -f {modelfile_path}")
+    logger.info(f"  ollama create {model_name}-agent -f {agent_modelfile_path}")
+
+
+def regenerate_modelfiles(output_path, model_name):
+    """Rewrite Modelfile + Modelfile.agent from current config + prompts.
+
+    Use case: prompt edits or sampling-param tweaks that don't require
+    re-running the GGUF conversion. Requires an existing GGUF in output_path
+    (from a prior `make export`). Pair with `make register` to redeploy.
+    """
+    ggufs = list(output_path.glob("*.gguf"))
+    if not ggufs:
+        raise FileNotFoundError(
+            f"No GGUF found in {output_path}. Run `make export` first to "
+            "produce one, or `make pipeline` for an end-to-end retrain."
+        )
+    if len(ggufs) > 1:
+        names = sorted(g.name for g in ggufs)
+        raise RuntimeError(
+            f"Multiple GGUFs in {output_path}: {names}. Cannot determine "
+            "which to reference; clean the directory and re-export."
+        )
+    _write_modelfiles(output_path, ggufs[0].resolve(), model_name)
+
+
 def export(adapter_path, output_path, quant, model_name):
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -98,22 +137,7 @@ def export(adapter_path, output_path, quant, model_name):
 
     bf16_path.unlink()
 
-    gguf_path = final_path.resolve()
-
-    modelfile_path = output_path / "Modelfile"
-    modelfile_path.write_text(_build_modelfile(gguf_path, MODEL_SYSTEM_PROMPT))
-
-    agent_prompt_path = Path(__file__).parent.parent / "prompts" / "agent_system_prompt.txt"
-    agent_prompt = agent_prompt_path.read_text().strip()
-    agent_modelfile_path = output_path / "Modelfile.agent"
-    agent_modelfile_path.write_text(_build_agent_overlay(model_name, agent_prompt))
-
-    logger.info(f"Modelfile written to {modelfile_path}")
-    logger.info(f"Agent overlay Modelfile written to {agent_modelfile_path}")
-    logger.info("")
-    logger.info("To register with Ollama, run:")
-    logger.info(f"  ollama create {model_name} -f {modelfile_path}")
-    logger.info(f"  ollama create {model_name}-agent -f {agent_modelfile_path}")
+    _write_modelfiles(output_path, final_path.resolve(), model_name)
 
 
 if __name__ == "__main__":
@@ -125,11 +149,24 @@ if __name__ == "__main__":
     parser.add_argument("--quant", default="q4_k_m", choices=["q4_k_m", "q5_k_m", "q8_0", "f16"],
                         help="Quantization method (default: q4_k_m)")
     parser.add_argument("--model-name", default="cortex", help="Name for ollama create (default: cortex)")
+    parser.add_argument(
+        "--modelfiles-only",
+        action="store_true",
+        help="Rewrite Modelfile + Modelfile.agent from current config + prompts "
+             "without re-running GGUF conversion. Requires an existing GGUF. "
+             "Pair with `make register` to redeploy after prompt edits.",
+    )
     parser.add_argument("--bg", action="store_true", help="Run in background (internal use)")
     args = parser.parse_args()
 
     adapter_path = args.adapter or (FINETUNE_OUTPUT_DIR / "merged")
     output_path = args.output or (FINETUNE_OUTPUT_DIR / "gguf")
+
+    if args.modelfiles_only:
+        banner("MODELFILES — STARTING")
+        regenerate_modelfiles(output_path, args.model_name)
+        banner("MODELFILES — DONE")
+        sys.exit(0)
 
     if not args.bg:
         log_path = Path("logs") / "export.log"

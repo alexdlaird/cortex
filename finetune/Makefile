@@ -1,4 +1,4 @@
-.PHONY: all pull pull-blog install prefetch nopyc clean ingest pretrain-tone generate-data train merge export register unregister smoke-test probe setup-base-agent ollama-sweep pipeline pipeline-resume pipeline-stop pipeline-bg _pipeline-launch
+.PHONY: all pull pull-blog install prefetch nopyc clean ingest pretrain-tone generate-data train merge export modelfiles register rebake unregister smoke-test probe setup-base-agent ollama-sweep pipeline pipeline-resume pipeline-stop pipeline-bg _pipeline-launch
 
 LOG_DIR := logs
 
@@ -118,6 +118,16 @@ export: $(INSTALL_DEP)
 		python $(CORTEX_DIR)/finetune/export.py --quant $(QUANT) --model-name $(MODEL_NAME); \
 	)
 
+# Rewrite Modelfile + Modelfile.agent from current config + prompts/, without
+# re-running the ~30-min GGUF conversion. Use this when only the system prompt
+# or sampling parameters changed since the last `make export` — pair with
+# `make register` to redeploy. Or use `make rebake` to do both in one shot.
+modelfiles: $(INSTALL_DEP)
+	@( \
+		source $(PROJECT_VENV)/bin/activate; \
+		python $(CORTEX_DIR)/finetune/export.py --modelfiles-only --model-name $(MODEL_NAME); \
+	)
+
 setup-base-agent: pull
 	@# One-off bootstrap: create $(BASE_AGENT_OVERLAY_NAME) overlay + cortex-agent alias.
 	@# Idempotent. Safe to re-run on an already-configured machine.
@@ -158,6 +168,13 @@ unregister: ollama-sweep
 	@# falls back to plain gemma on the chat path.
 	ollama cp $(BASE_AGENT_OVERLAY_NAME) $(MODEL_NAME)-agent
 	docker restart pipelines
+
+# Convenience: regenerate Modelfile + Modelfile.agent from current config and
+# prompts, then re-create cortex + cortex-agent in Ollama and refresh the
+# pipelines container. Use after editing prompts/agent_system_prompt.txt or
+# sampling params in config.py — saves ~30 min vs. full `make export && make
+# register` since GGUF conversion is skipped.
+rebake: modelfiles register
 
 register: ollama-sweep
 	@# Clear Ollama's cached manifest/blob digest for this model; otherwise
