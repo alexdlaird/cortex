@@ -318,9 +318,18 @@ pipeline-stop:
 # toward verbose prose and is off-distribution from real agent use. To opt in,
 # run `make pretrain-tone` manually before `make pipeline`.
 pipeline-bg: prefetch
+	@echo ""
+	@echo "################################################################################"
+	@echo "##  PIPELINE — STARTING"
+	@echo "################################################################################"
 	$(call run_stage,ingest,$(OFFLINE_ENV) $(MAKE) --no-print-directory ingest NO_INSTALL=1)
 	$(call run_stage,generate-data,$(OFFLINE_ENV) $(MAKE) --no-print-directory generate-data NO_INSTALL=1 APPEND=1 SKIP_SWEEP=1)
 	$(call run_stage,train,$(OFFLINE_ENV) $(MAKE) --no-print-directory train NO_INSTALL=1 RESUME=1)
 	$(call run_stage,merge,$(OFFLINE_ENV) $(MAKE) --no-print-directory merge NO_INSTALL=1)
 	$(call run_stage,export,$(OFFLINE_ENV) $(MAKE) --no-print-directory export NO_INSTALL=1)
 	$(call run_stage,register,$(OFFLINE_ENV) $(MAKE) --no-print-directory register NO_INSTALL=1)
+	@echo ""
+	@echo "################################################################################"
+	@echo "##  PIPELINE — DONE"
+	@echo "################################################################################"
+	@ollama list
