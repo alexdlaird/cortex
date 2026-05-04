@@ -69,6 +69,13 @@ def _has_saved_artifacts(path: Path | None) -> bool:
     return bool(path and path.exists() and path.is_dir() and any(path.iterdir()))
 
 
+def _has_resumable_checkpoint(adapter_path: Path) -> bool:
+    return any(
+        (cp / "trainer_state.json").exists()
+        for cp in adapter_path.glob("checkpoint-*")
+    )
+
+
 def resolve_pretrain_adapter_path(output_path, pretrain_adapter_path=None, base_only=False):
     if base_only:
         return None
@@ -144,7 +151,7 @@ def train(data_path, output_path, resume, pretrain_adapter_path=None, base_only=
     adapter_path = output_path / "lora-adapter"
     adapter_path.mkdir(parents=True, exist_ok=True)
 
-    resume_from = str(adapter_path) if resume and any(adapter_path.iterdir()) else None
+    resume_from = True if resume and _has_resumable_checkpoint(adapter_path) else None
 
     trainer = SFTTrainer(
         model=model,
