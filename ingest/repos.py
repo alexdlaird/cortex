@@ -27,6 +27,23 @@ from config import (
     REPOS,
 )
 
+try:
+    from config import EXCLUDE_PATTERNS
+except ImportError:
+    EXCLUDE_PATTERNS = []
+
+# Globs always excluded from repo crawls. Merged with user-supplied
+# EXCLUDE_PATTERNS so users can layer project-specific exclusions
+# (e.g., starter-template scaffolding) without losing the defaults.
+DEFAULT_EXCLUDES = [
+    "**/__pycache__/**",
+    "**/.git/**",
+    "**/node_modules/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "**/build/**",
+]
+
 logger = logging.getLogger(__name__)
 
 # Suppress noisy third-party loggers
@@ -66,7 +83,7 @@ def load_repo(path: Path, extensions: list[str]):
             input_dir=str(path),
             recursive=True,
             required_exts=extensions,
-            exclude=["**/__pycache__/**", "**/.git/**", "**/node_modules/**", "**/.venv/**", "**/venv/**", "**/build/**"],
+            exclude=DEFAULT_EXCLUDES + EXCLUDE_PATTERNS,
         ).load_data()
     except Exception:
         logger.warning(f"No matching files found in {path}, skipping.")

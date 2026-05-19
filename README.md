@@ -38,7 +38,7 @@ CODE_EXTENSIONS = [
     # Infrastructure
     ".tf", ".hcl",
 ]
-DOC_EXTENSIONS = [".md", ".rst", ".txt"]
+DOC_EXTENSIONS = [".md", ".mdx", ".rst", ".txt", ".astro"]
 
 # Local repo paths (relative to DEVELOPER_DIR) to ingest
 REPOS = [
@@ -48,6 +48,12 @@ REPOS = [
 
 # Paths to standalone doc/spec files or directories
 DOC_PATHS: list[str] = []
+
+# Optional: extra glob patterns to exclude from repo crawls, merged with
+# the built-in defaults (node_modules, .git, build, etc.). Use to drop
+# starter-template scaffolding or vendored UI that would otherwise add
+# retrieval noise.
+EXCLUDE_PATTERNS: list[str] = []
 ```
 
 ## Usage
