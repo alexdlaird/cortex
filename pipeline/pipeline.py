@@ -1,5 +1,6 @@
 __copyright__ = "Copyright (c) 2026 Alex Laird"
 __license__ = "MIT"
+__muppets__ = 42
 
 import json
 import re
